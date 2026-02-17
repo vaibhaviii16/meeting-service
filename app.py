@@ -8,24 +8,25 @@ from google.oauth2.credentials import Credentials
 app = Flask(__name__)
 
 # ==========================
-# CONFIGURATION
+# CONFIG
 # ==========================
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 TOKEN_FILE = "token.json"
-CREDS_FILE = "credentials.json"
 
-# 🔥 IMPORTANT: Must match EXACTLY what is in Google Cloud Console
+CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
+CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET")
+
 REDIRECT_URI = "https://meeting-service-tgf2.onrender.com/oauth2callback"
 
 creds = None
 
-# Load existing token if available
+# Load saved token if exists
 if os.path.exists(TOKEN_FILE):
     creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
 
 
 # ==========================
-# HOME ROUTE
+# HOME
 # ==========================
 @app.route("/")
 def home():
@@ -33,20 +34,27 @@ def home():
 
 
 # ==========================
-# AUTHORIZE ROUTE
+# AUTHORIZE
 # ==========================
 @app.route("/authorize")
 def authorize():
-    flow = Flow.from_client_secrets_file(
-        CREDS_FILE,
+    flow = Flow.from_client_config(
+        {
+            "web": {
+                "client_id": CLIENT_ID,
+                "client_secret": CLIENT_SECRET,
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+            }
+        },
         scopes=SCOPES,
         redirect_uri=REDIRECT_URI
     )
 
-    auth_url, state = flow.authorization_url(
+    auth_url, _ = flow.authorization_url(
         access_type="offline",
-        include_granted_scopes="true",
-        prompt="consent"
+        prompt="consent",
+        include_granted_scopes="true"
     )
 
     return redirect(auth_url)
@@ -59,8 +67,15 @@ def authorize():
 def oauth2callback():
     global creds
 
-    flow = Flow.from_client_secrets_file(
-        CREDS_FILE,
+    flow = Flow.from_client_config(
+        {
+            "web": {
+                "client_id": CLIENT_ID,
+                "client_secret": CLIENT_SECRET,
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+            }
+        },
         scopes=SCOPES,
         redirect_uri=REDIRECT_URI
     )
@@ -69,7 +84,7 @@ def oauth2callback():
 
     creds = flow.credentials
 
-    # Save token permanently
+    # Save token
     with open(TOKEN_FILE, "w") as token:
         token.write(creds.to_json())
 
@@ -77,20 +92,20 @@ def oauth2callback():
 
 
 # ==========================
-# CREATE MEETING ENDPOINT
+# CREATE MEETING
 # ==========================
 @app.route("/create-meeting", methods=["POST"])
 def create_meeting():
     global creds
 
     if not creds:
-        return jsonify({"error": "Please authorize first via /authorize"}), 401
+        return jsonify({"error": "Authorize first via /authorize"}), 401
 
     if not creds.valid:
         if creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            return jsonify({"error": "Authorization expired. Please re-authorize."}), 401
+            return jsonify({"error": "Authorization expired. Re-authorize."}), 401
 
     service = build("calendar", "v3", credentials=creds)
 
@@ -124,11 +139,9 @@ def create_meeting():
             conferenceDataVersion=1
         ).execute()
 
-        meet_link = event.get("hangoutLink")
-
         return jsonify({
             "status": "success",
-            "meeting_link": meet_link
+            "meeting_link": event.get("hangoutLink")
         })
 
     except Exception as e:
@@ -147,7 +160,7 @@ def routes():
 
 
 # ==========================
-# RUN APP
+# RUN
 # ==========================
 if __name__ == "__main__":
     app.run(debug=True)

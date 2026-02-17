@@ -122,3 +122,9 @@ def create_meeting():
             "status": "error",
             "message": str(e)
         }), 500
+@app.route("/routes")
+def list_routes():
+    return str(app.url_map)
+@app.route("/debug")
+def debug():
+    return str(app.url_map)

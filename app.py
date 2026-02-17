@@ -1,42 +1,32 @@
 import os
-from flask import Flask, request, jsonify, redirect
+import uuid
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import RedirectResponse
 from google_auth_oauthlib.flow import Flow
-from googleapiclient.discovery import build
-from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
 
-app = Flask(__name__)
+app = FastAPI()
 
-# ==========================
+# ==============================
 # CONFIG
-# ==========================
-SCOPES = ['https://www.googleapis.com/auth/calendar']
+# ==============================
+
+SCOPES = ["https://www.googleapis.com/auth/calendar"]
+
+CLIENT_ID = os.getenv("CLIENT_ID")
+CLIENT_SECRET = os.getenv("CLIENT_SECRET")
+REDIRECT_URI = os.getenv("REDIRECT_URI")
+
 TOKEN_FILE = "token.json"
 
-CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
-CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET")
 
-REDIRECT_URI = "https://meeting-service-tgf2.onrender.com/oauth2callback"
+# ==============================
+# AUTHORIZATION ROUTE
+# ==============================
 
-creds = None
-
-# Load saved token if exists
-if os.path.exists(TOKEN_FILE):
-    creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-
-
-# ==========================
-# HOME
-# ==========================
-@app.route("/")
-def home():
-    return "Meeting Service Running ✅"
-
-
-# ==========================
-# AUTHORIZE
-# ==========================
-@app.route("/authorize")
+@app.get("/authorize")
 def authorize():
     flow = Flow.from_client_config(
         {
@@ -48,25 +38,23 @@ def authorize():
             }
         },
         scopes=SCOPES,
-        redirect_uri=REDIRECT_URI
+        redirect_uri=REDIRECT_URI,
     )
 
     auth_url, _ = flow.authorization_url(
         access_type="offline",
-        prompt="consent",
-        include_granted_scopes="true"
+        prompt="consent"
     )
 
-    return redirect(auth_url)
+    return RedirectResponse(auth_url)
 
 
-# ==========================
-# OAUTH CALLBACK
-# ==========================
-@app.route("/oauth2callback")
-def oauth2callback():
-    global creds
+# ==============================
+# CALLBACK ROUTE
+# ==============================
 
+@app.get("/oauth2callback")
+def oauth2callback(code: str):
     flow = Flow.from_client_config(
         {
             "web": {
@@ -77,90 +65,94 @@ def oauth2callback():
             }
         },
         scopes=SCOPES,
-        redirect_uri=REDIRECT_URI
+        redirect_uri=REDIRECT_URI,
     )
 
-    flow.fetch_token(authorization_response=request.url)
+    flow.fetch_token(code=code)
 
     creds = flow.credentials
 
-    # Save token
     with open(TOKEN_FILE, "w") as token:
         token.write(creds.to_json())
 
-    return "Authorization successful ✅ You can close this window."
+    return {"message": "Authorization successful ✅ You can close this window."}
 
 
-# ==========================
-# CREATE MEETING
-# ==========================
-@app.route("/create-meeting", methods=["POST"])
-def create_meeting():
-    global creds
+# ==============================
+# LOAD & REFRESH TOKEN
+# ==============================
 
-    if not creds:
-        return jsonify({"error": "Authorize first via /authorize"}), 401
+def get_google_credentials():
+    if not os.path.exists(TOKEN_FILE):
+        raise HTTPException(status_code=401, detail="Please authorize first via /authorize")
 
-    if not creds.valid:
-        if creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return jsonify({"error": "Authorization expired. Re-authorize."}), 401
+    creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
 
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        with open(TOKEN_FILE, "w") as token:
+            token.write(creds.to_json())
+
+    return creds
+
+
+# ==============================
+# CREATE MEETING (QUERY PARAMS)
+# ==============================
+
+@app.post("/create-meeting")
+def create_meeting(
+    start_time: str,
+    end_time: str,
+    candidate_email: str,
+    interviewer_email: str,
+    summary: str = "Interview Meeting"
+):
+    """
+    Example:
+    POST /create-meeting?start_time=2026-02-20T10:00:00+05:30
+                         &end_time=2026-02-20T10:30:00+05:30
+                         &candidate_email=test@gmail.com
+                         &interviewer_email=hr@gmail.com
+    """
+
+    creds = get_google_credentials()
     service = build("calendar", "v3", credentials=creds)
 
-    data = request.get_json()
+    event = {
+        "summary": summary,
+        "start": {
+            "dateTime": start_time,
+            "timeZone": "Asia/Kolkata",
+        },
+        "end": {
+            "dateTime": end_time,
+            "timeZone": "Asia/Kolkata",
+        },
+        "attendees": [
+            {"email": candidate_email},
+            {"email": interviewer_email},
+        ],
+        "conferenceData": {
+            "createRequest": {
+                "requestId": str(uuid.uuid4()),
+                "conferenceSolutionKey": {"type": "hangoutsMeet"},
+            }
+        },
+    }
 
-    try:
-        event = {
-            "summary": "Interview Meeting",
-            "start": {
-                "dateTime": data["start_time"],
-                "timeZone": "Asia/Kolkata",
-            },
-            "end": {
-                "dateTime": data["end_time"],
-                "timeZone": "Asia/Kolkata",
-            },
-            "attendees": [
-                {"email": data["candidate_email"]},
-                {"email": data["interviewer_email"]},
-            ],
-            "conferenceData": {
-                "createRequest": {
-                    "requestId": "interview-" + data["start_time"]
-                }
-            },
-        }
-
-        event = service.events().insert(
+    event = (
+        service.events()
+        .insert(
             calendarId="primary",
             body=event,
-            conferenceDataVersion=1
-        ).execute()
+            conferenceDataVersion=1,
+        )
+        .execute()
+    )
 
-        return jsonify({
-            "status": "success",
-            "meeting_link": event.get("hangoutLink")
-        })
-
-    except Exception as e:
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
-
-
-# ==========================
-# DEBUG ROUTE
-# ==========================
-@app.route("/routes")
-def routes():
-    return str(app.url_map)
-
-
-# ==========================
-# RUN
-# ==========================
-if __name__ == "__main__":
-    app.run(debug=True)
+    return {
+        "status": "success",
+        "meeting_link": event.get("hangoutLink"),
+        "event_id": event.get("id"),
+    }
